@@ -12,13 +12,23 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildDossier } from './vendor/makefun-game.ts';
+import { buildDossier, DOSSIER_MAX_BYTES, DOSSIER_SCHEMA } from './vendor/makefun-game.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+
+// Preflight: fail here, with a message that names what is wrong, when this file is not run from the
+// entry's root. Without it the copies below die inside cpSync with a bare ENOENT that says nothing
+// about the actual problem (a checkout missing game/, or main.ts copied somewhere on its own).
+for (const needed of ['game', join('game', 'index.html')]) {
+  if (!existsSync(join(here, needed))) {
+    console.error(`main: cannot hand in: ${needed} is missing beside main.ts — run \`node main.ts\` from the entry's root, with game/ and screenshots/ beside it.`);
+    process.exit(1);
+  }
+}
 
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
@@ -29,13 +39,38 @@ if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), joi
 // scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
 // files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
 // screenshots/ and dossier.json).
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    game_max_files: 993,
-    game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  }),
+const dossierBytes = buildDossier(out, {
+  text_max_bytes: 163840,
+  screenshots: { max: 4, max_bytes: 262144 },
+  game_max_files: 993,
+  game_max_bytes: 50331648,
+  game_path_max_bytes: 1000,
+});
+writeFileSync(join(out, 'dossier.json'), dossierBytes);
+
+// Self-check: read the dossier back off disk and hold it to the schema the judge reads (the vendored
+// library's DOSSIER_SCHEMA), so a hand-in that ever writes the wrong shape fails here, loudly and
+// before grading, instead of scoring as a broken entry. This only reads: the bytes on disk are the
+// bytes buildDossier wrote, untouched.
+const written = readFileSync(join(out, 'dossier.json'));
+const dossier = JSON.parse(written.toString('utf8'));
+const problems = [];
+if (dossier.schema !== DOSSIER_SCHEMA) problems.push(`schema is ${JSON.stringify(dossier.schema)}, not ${DOSSIER_SCHEMA}`);
+if (!Array.isArray(dossier.images) || dossier.images.length < 1 || dossier.images.length > 4) {
+  problems.push('images must hold 1 to 4 screenshots');
+} else if (dossier.images.some((img) => typeof img.name !== 'string' || img.name === '')) {
+  problems.push('a screenshot in images has no name');
+}
+if (!Number.isInteger(dossier.cover) || dossier.cover < 0 || dossier.cover >= (Array.isArray(dossier.images) ? dossier.images.length : 0)) {
+  problems.push(`cover (${JSON.stringify(dossier.cover)}) does not index a screenshot`);
+}
+if (typeof dossier.text !== 'string' || !dossier.text.startsWith('## Game\n')) problems.push('text does not open with the ## Game block');
+if (written.length > DOSSIER_MAX_BYTES) problems.push(`the dossier is ${written.length} bytes, over the ${DOSSIER_MAX_BYTES} a dossier may hold`);
+if (problems.length > 0) {
+  console.error(`main: dossier self-check failed: ${problems.join('; ')}`);
+  process.exit(1);
+}
+console.log(
+  `main: handed in ${dossier.images.length} screenshots (cover: ${dossier.images[dossier.cover].name}), ` +
+    `dossier ${written.length} bytes with ${Buffer.byteLength(dossier.text, 'utf8')} bytes of game text.`,
 );
